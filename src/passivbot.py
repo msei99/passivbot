@@ -5500,6 +5500,18 @@ class Passivbot:
             max_warmup_minutes = 0
         span_buffer = 1.0 + max(0.0, warmup_ratio)
 
+        # Delay between individual candle fetches to spread API load across time.
+        # Uses the same warmup_fetch_delay_ms config; defaults to 200ms for Hyperliquid.
+        fetch_delay_ms = get_optional_live_value(self.config, "warmup_fetch_delay_ms", None)
+        try:
+            fetch_delay_ms = float(fetch_delay_ms) if fetch_delay_ms is not None else None
+        except Exception:
+            fetch_delay_ms = None
+        if fetch_delay_ms is None:
+            exchange_lower = self.exchange.lower() if self.exchange else ""
+            fetch_delay_ms = 200.0 if exchange_lower == "hyperliquid" else 0.0
+        fetch_delay_s = max(0.0, float(fetch_delay_ms) / 1000.0)
+
         for sym in to_refresh:
             try:
                 max_span = 0.0
@@ -5536,6 +5548,8 @@ class Passivbot:
                     strict=False,
                     max_lookback_candles=win,
                 )
+                if fetch_delay_s > 0:
+                    await asyncio.sleep(fetch_delay_s)
             except TimeoutError as exc:
                 logging.warning(
                     "Timed out acquiring candle lock for %s; forager refresh will retry (%s)",
