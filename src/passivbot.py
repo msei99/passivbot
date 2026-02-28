@@ -2811,16 +2811,27 @@ class Passivbot:
                 max_age_ms = max(60_000, rate_limit_age_ms) if max_calls > 0 else 60_000
             else:
                 max_age_ms = self._forager_target_staleness_ms(len(candidates), max_calls)
+            # Compute fetch budget: limits how many symbols may trigger a network
+            # request in this ranking cycle (prevents burst of 68 fetches on restart).
+            fetch_budget = (
+                self._forager_refresh_budget(max_calls) if max_calls > 0 else None
+            )
             if clip_pct > 0.0:
                 volumes, log_ranges = await self.calc_volumes_and_log_ranges(
-                    pside, symbols=candidates, max_age_ms=max_age_ms
+                    pside,
+                    symbols=candidates,
+                    max_age_ms=max_age_ms,
+                    max_network_fetches=fetch_budget,
                 )
             else:
                 volumes = {
                     symbol: float(len(candidates) - idx) for idx, symbol in enumerate(candidates)
                 }
                 log_ranges = await self.calc_log_range(
-                    pside, eligible_symbols=candidates, max_age_ms=max_age_ms
+                    pside,
+                    eligible_symbols=candidates,
+                    max_age_ms=max_age_ms,
+                    max_network_fetches=fetch_budget,
                 )
             features = [
                 {
@@ -2858,11 +2869,16 @@ class Passivbot:
         symbols: Optional[Iterable[str]] = None,
         *,
         max_age_ms: Optional[int] = 60_000,
+        max_network_fetches: Optional[int] = None,
     ) -> Tuple[Dict[str, float], Dict[str, float]]:
         """Compute 1m EMA quote volume and 1m EMA log range per symbol with one candles fetch.
 
         This uses CandlestickManager.get_latest_ema_metrics() to avoid calling get_candles() twice
         per symbol (once for volume and once for log range).
+
+        If *max_network_fetches* is set, at most that many symbols will be allowed to
+        trigger a network fetch.  The remaining symbols receive a very large TTL so they
+        return cached data (or 0.0 if nothing is cached) without hitting the API.
         """
         span_volume = int(round(self.bot_value(pside, "filter_volume_ema_span")))
         span_volatility = int(round(self.bot_value(pside, "filter_volatility_ema_span")))
@@ -2884,20 +2900,46 @@ class Passivbot:
         if symbols is None:
             symbols = self.get_symbols_approved_or_has_pos(pside)
 
+        syms = list(symbols)
+
+        # Determine per-symbol TTL: symbols allowed to fetch get the real max_age_ms,
+        # symbols over the budget get a huge TTL so they only use cached data.
+        CACHE_ONLY_TTL = 365 * 24 * 3600 * 1000  # ~1 year – effectively cache-only
+        per_sym_ttl: Dict[str, int] = {}
+        if max_network_fetches is not None and max_network_fetches >= 0 and max_age_ms is not None:
+            now = utc_ms()
+            # Sort symbols by staleness (oldest first) so the most stale get refreshed.
+            staleness = []
+            for s in syms:
+                try:
+                    last_ref = self.cm.get_last_refresh_ms(s)
+                except Exception:
+                    last_ref = 0
+                staleness.append((s, int(now - last_ref) if last_ref > 0 else now))
+            staleness.sort(key=lambda x: x[1], reverse=True)  # most stale first
+            fetch_set = set(s for s, _ in staleness[:max_network_fetches])
+            for s in syms:
+                per_sym_ttl[s] = int(max_age_ms) if s in fetch_set else CACHE_ONLY_TTL
+        else:
+            for s in syms:
+                per_sym_ttl[s] = int(max_age_ms) if max_age_ms is not None else 0
+
         async def one(symbol: str):
             try:
-                if max_age_ms is not None:
-                    ttl = int(max_age_ms)
-                else:
-                    has_pos = self.has_position(symbol)
-                    has_oo = (
-                        bool(self.open_orders.get(symbol)) if hasattr(self, "open_orders") else False
-                    )
-                    ttl = (
-                        60_000
-                        if (has_pos or has_oo)
-                        else int(getattr(self, "inactive_coin_candle_ttl_ms", 600_000))
-                    )
+                ttl = per_sym_ttl.get(symbol)
+                if ttl is None or ttl == 0:
+                    if max_age_ms is not None:
+                        ttl = int(max_age_ms)
+                    else:
+                        has_pos = self.has_position(symbol)
+                        has_oo = (
+                            bool(self.open_orders.get(symbol)) if hasattr(self, "open_orders") else False
+                        )
+                        ttl = (
+                            60_000
+                            if (has_pos or has_oo)
+                            else int(getattr(self, "inactive_coin_candle_ttl_ms", 600_000))
+                        )
                 res = await self.cm.get_latest_ema_metrics(
                     symbol,
                     {"qv": span_volume, "log_range": span_volatility},
@@ -2911,7 +2953,6 @@ class Passivbot:
             except Exception:
                 return (0.0, 0.0)
 
-        syms = list(symbols)
         tasks = {s: asyncio.create_task(one(s)) for s in syms}
         volumes: Dict[str, float] = {}
         log_ranges: Dict[str, float] = {}
@@ -5597,10 +5638,14 @@ class Passivbot:
         eligible_symbols: Optional[Iterable[str]] = None,
         *,
         max_age_ms: Optional[int] = 60_000,
+        max_network_fetches: Optional[int] = None,
     ) -> Dict[str, float]:
         """Compute 1m EMA of log range per symbol: EMA(ln(high/low)).
 
         Returns mapping symbol -> ema_log_range; non-finite/failed computations yield 0.0.
+
+        If *max_network_fetches* is set, at most that many symbols will be allowed to
+        trigger a network fetch; the rest use cached data only.
         """
         if eligible_symbols is None:
             eligible_symbols = self.eligible_symbols
@@ -5620,23 +5665,47 @@ class Passivbot:
         if max_warmup_minutes > 0:
             window_candles = min(int(window_candles), int(max_warmup_minutes))
 
+        syms = list(eligible_symbols)
+
+        # Determine per-symbol TTL with optional fetch budget.
+        CACHE_ONLY_TTL = 365 * 24 * 3600 * 1000  # ~1 year – effectively cache-only
+        per_sym_ttl: Dict[str, int] = {}
+        if max_network_fetches is not None and max_network_fetches >= 0 and max_age_ms is not None:
+            now = utc_ms()
+            staleness = []
+            for s in syms:
+                try:
+                    last_ref = self.cm.get_last_refresh_ms(s)
+                except Exception:
+                    last_ref = 0
+                staleness.append((s, int(now - last_ref) if last_ref > 0 else now))
+            staleness.sort(key=lambda x: x[1], reverse=True)
+            fetch_set = set(s for s, _ in staleness[:max_network_fetches])
+            for s in syms:
+                per_sym_ttl[s] = int(max_age_ms) if s in fetch_set else CACHE_ONLY_TTL
+        else:
+            for s in syms:
+                per_sym_ttl[s] = int(max_age_ms) if max_age_ms is not None else 0
+
         # Compute EMA of log range on 1m candles: ln(high/low)
         async def one(symbol: str):
             try:
-                # If caller passes a TTL, use it; otherwise select per-symbol TTL
-                if max_age_ms is not None:
-                    ttl = int(max_age_ms)
-                else:
-                    # More generous TTL for non-traded symbols
-                    has_pos = self.has_position(symbol)
-                    has_oo = (
-                        bool(self.open_orders.get(symbol)) if hasattr(self, "open_orders") else False
-                    )
-                    ttl = (
-                        60_000
-                        if (has_pos or has_oo)
-                        else int(getattr(self, "inactive_coin_candle_ttl_ms", 600_000))
-                    )
+                ttl = per_sym_ttl.get(symbol)
+                if ttl is None or ttl == 0:
+                    # If caller passes a TTL, use it; otherwise select per-symbol TTL
+                    if max_age_ms is not None:
+                        ttl = int(max_age_ms)
+                    else:
+                        # More generous TTL for non-traded symbols
+                        has_pos = self.has_position(symbol)
+                        has_oo = (
+                            bool(self.open_orders.get(symbol)) if hasattr(self, "open_orders") else False
+                        )
+                        ttl = (
+                            60_000
+                            if (has_pos or has_oo)
+                            else int(getattr(self, "inactive_coin_candle_ttl_ms", 600_000))
+                        )
                 res = await self.cm.get_latest_ema_metrics(
                     symbol,
                     {"log_range": span},
@@ -5649,7 +5718,6 @@ class Passivbot:
             except Exception:
                 return 0.0
 
-        syms = list(eligible_symbols)
         tasks = {s: asyncio.create_task(one(s)) for s in syms}
         out = {}
         n = len(syms)

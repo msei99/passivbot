@@ -68,7 +68,7 @@ class CoinFilterHarness(Passivbot):
     async def calc_volumes(self, _pside, symbols):
         return {sym: self._volumes[sym] for sym in symbols}
 
-    async def calc_log_range(self, _pside, eligible_symbols, max_age_ms=None):
+    async def calc_log_range(self, _pside, eligible_symbols, max_age_ms=None, max_network_fetches=None):
         return {sym: self._log_ranges[sym] for sym in eligible_symbols}
 
     def is_pside_enabled(self, _pside):
