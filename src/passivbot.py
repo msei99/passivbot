@@ -1562,7 +1562,7 @@ class Passivbot:
             fetch_delay_ms = None
         if fetch_delay_ms is None:
             exchange_lower = self.exchange.lower() if self.exchange else ""
-            fetch_delay_ms = 500.0 if exchange_lower == "hyperliquid" else 0.0
+            fetch_delay_ms = 200.0 if exchange_lower == "hyperliquid" else 0.0
         fetch_delay_s = max(0.0, float(fetch_delay_ms) / 1000.0)
 
         async def one(sym: str):
@@ -5537,7 +5537,7 @@ class Passivbot:
             fetch_delay_ms = None
         if fetch_delay_ms is None:
             exchange_lower = self.exchange.lower() if self.exchange else ""
-            fetch_delay_ms = 500.0 if exchange_lower == "hyperliquid" else 0.0
+            fetch_delay_ms = 200.0 if exchange_lower == "hyperliquid" else 0.0
         fetch_delay_s = max(0.0, float(fetch_delay_ms) / 1000.0)
 
         for sym in to_refresh:
@@ -5613,7 +5613,7 @@ class Passivbot:
                 fetch_delay_ms = None
             if fetch_delay_ms is None:
                 exchange_lower = self.exchange.lower() if self.exchange else ""
-                fetch_delay_ms = 500.0 if exchange_lower == "hyperliquid" else 0.0
+                fetch_delay_ms = 200.0 if exchange_lower == "hyperliquid" else 0.0
             fetch_delay_s = max(0.0, float(fetch_delay_ms) / 1000.0)
 
             symbols = sorted(set(self.active_symbols))
