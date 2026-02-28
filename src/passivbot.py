@@ -1910,6 +1910,12 @@ class Passivbot:
                     await asyncio.sleep(0.1)
             except RestartBotException:
                 raise  # Propagate restart without incrementing error count
+            except RateLimitExceeded as e:
+                self._health_errors += 1
+                self._health_rate_limits += 1
+                logging.warning("[rate] execution loop hit rate limit; backing off 5s...")
+                await self.restart_bot_on_too_many_errors()
+                await asyncio.sleep(5.0)
             except Exception as e:
                 self._health_errors += 1
                 logging.error(f"error with {get_function_name()} {e}")
@@ -5662,7 +5668,14 @@ class Passivbot:
                         )
                 # update markets dict once every hour
                 if now - self.init_markets_last_update_ms > 1000 * 60 * 60:
-                    await self.init_markets(verbose=False)
+                    try:
+                        await self.init_markets(verbose=False)
+                    except RateLimitExceeded:
+                        self._health_rate_limits += 1
+                        logging.warning(
+                            "[rate] hourly init_markets hit rate limit; will retry next cycle"
+                        )
+                        await asyncio.sleep(10)
                 await asyncio.sleep(1)
             except Exception as e:
                 logging.error(f"error with {get_function_name()} {e}")
