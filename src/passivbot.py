@@ -2799,15 +2799,17 @@ class Passivbot:
             clip_pct = self.bot_value(pside, "filter_volume_drop_pct")
             volatility_drop = self.bot_value(pside, "filter_volatility_drop_pct")
             max_n_positions = self.get_max_n_positions(pside)
-            # Best-effort ranking when slots are full: use dynamic staleness budget.
+            # Apply max_ohlcv_fetches_per_minute in all cases (slots open or full).
+            max_calls = get_optional_live_value(self.config, "max_ohlcv_fetches_per_minute", 0)
+            try:
+                max_calls = int(max_calls) if max_calls is not None else 0
+            except Exception:
+                max_calls = 0
             if slots_open:
-                max_age_ms = 60_000
+                rate_limit_age_ms = self._forager_target_staleness_ms(len(candidates), max_calls)
+                # Respect rate limit even with open slots; floor at 60s for responsiveness.
+                max_age_ms = max(60_000, rate_limit_age_ms) if max_calls > 0 else 60_000
             else:
-                max_calls = get_optional_live_value(self.config, "max_ohlcv_fetches_per_minute", 0)
-                try:
-                    max_calls = int(max_calls) if max_calls is not None else 0
-                except Exception:
-                    max_calls = 0
                 max_age_ms = self._forager_target_staleness_ms(len(candidates), max_calls)
             if clip_pct > 0.0:
                 volumes, log_ranges = await self.calc_volumes_and_log_ranges(
@@ -5357,7 +5359,13 @@ class Passivbot:
             return
 
         if slots_open_any:
-            budget = len(all_candidates)
+            if max_calls > 0:
+                # Respect rate limit even with open slots; use token bucket budget.
+                budget = self._forager_refresh_budget(max_calls)
+                if budget <= 0:
+                    return
+            else:
+                budget = len(all_candidates)
         else:
             if max_calls <= 0:
                 return
@@ -5371,11 +5379,12 @@ class Passivbot:
         if not candidates:
             return
 
-        target_age_ms = (
-            60_000
-            if slots_open_any
-            else self._forager_target_staleness_ms(len(all_candidates), max_calls)
-        )
+        if slots_open_any:
+            rate_limit_age_ms = self._forager_target_staleness_ms(len(all_candidates), max_calls)
+            # Respect rate limit even with open slots; floor at 60s for responsiveness.
+            target_age_ms = max(60_000, rate_limit_age_ms) if max_calls > 0 else 60_000
+        else:
+            target_age_ms = self._forager_target_staleness_ms(len(all_candidates), max_calls)
         now = utc_ms()
         stale: List[Tuple[float, str]] = []
         for sym in candidates:
