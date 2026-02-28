@@ -198,22 +198,40 @@ class HyperliquidBot(CCXTBot):
         )
         return positions, balance
 
+    async def _get_positions_and_balance_cached(self):
+        """Fetch positions+balance with dedup: concurrent callers share one API call."""
+        if not hasattr(self, "_hl_fetch_lock"):
+            self._hl_fetch_lock = asyncio.Lock()
+        async with self._hl_fetch_lock:
+            # If another caller already fetched while we waited for the lock,
+            # return the cached result instead of making a second API call.
+            cached_gen = getattr(self, "_hl_cache_generation", 0)
+            my_gen = getattr(self, "_hl_my_generation", 0)
+            if cached_gen > my_gen and hasattr(self, "_hl_cached_result"):
+                return self._hl_cached_result
+            result = await self._fetch_positions_and_balance()
+            self._hl_cached_result = result
+            self._hl_cache_generation = cached_gen + 1
+            return result
+
     async def fetch_positions(self):
-        positions, balance = await self._fetch_positions_and_balance()
-        self._last_hl_positions_balance = (positions, balance)
-        self._hl_positions_balance_applied = False
+        # Mark a new generation so fetch_balance knows to wait for our result
+        self._hl_my_generation = getattr(self, "_hl_cache_generation", 0)
+        positions, balance = await self._get_positions_and_balance_cached()
+        self._last_hl_balance = balance
+        self._hl_balance_consumed = False
         return positions
 
     async def fetch_balance(self):
-        cached = getattr(self, "_last_hl_positions_balance", None)
-        applied = getattr(self, "_hl_positions_balance_applied", False)
-        if cached and not applied:
-            positions, balance = cached
-            self._hl_positions_balance_applied = True
-            return balance
-        positions, balance = await self._fetch_positions_and_balance()
-        self._last_hl_positions_balance = (positions, balance)
-        self._hl_positions_balance_applied = True
+        # Check if fetch_positions already got us a fresh balance
+        if getattr(self, "_last_hl_balance", None) is not None and not getattr(
+            self, "_hl_balance_consumed", True
+        ):
+            self._hl_balance_consumed = True
+            return self._last_hl_balance
+        # Otherwise fetch (will share API call via lock if fetch_positions is in flight)
+        self._hl_my_generation = getattr(self, "_hl_cache_generation", 0)
+        positions, balance = await self._get_positions_and_balance_cached()
         return balance
 
     async def fetch_tickers(self):
