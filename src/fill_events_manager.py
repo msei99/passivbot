@@ -2626,6 +2626,8 @@ class HyperliquidFetcher(BaseFetcher):
         fetch_count = 0
 
         prev_params = None
+        rate_limit_retries = 0
+        max_rate_limit_retries = 5
         while True:
             check_params = dict(params)
             check_params["_page"] = fetch_count
@@ -2640,12 +2642,24 @@ class HyperliquidFetcher(BaseFetcher):
             try:
                 trades = await self.api.fetch_my_trades(params=params)
             except RateLimitExceeded as exc:
+                rate_limit_retries += 1
+                if rate_limit_retries > max_rate_limit_retries:
+                    logger.warning(
+                        "HyperliquidFetcher.fetch: too many rate limit retries (%d), aborting",
+                        rate_limit_retries,
+                    )
+                    break
                 logger.debug(
-                    "HyperliquidFetcher.fetch: rate limit exceeded, sleeping briefly (%s)",
+                    "HyperliquidFetcher.fetch: rate limit exceeded (retry %d/%d), sleeping (%s)",
+                    rate_limit_retries,
+                    max_rate_limit_retries,
                     exc,
                 )
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(2.0 * rate_limit_retries)
+                # Reset prev_params so the retry is not flagged as repeated
+                prev_params = None
                 continue
+            rate_limit_retries = 0
             fetch_count += 1
             if fetch_count > 1:
                 logger.debug(
