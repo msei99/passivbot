@@ -953,6 +953,28 @@ class Passivbot:
         """Initialise state, warm cached data, and launch background loops."""
         self._log_startup_banner()
         logging.info("[boot] starting bot %s...", self.exchange)
+
+        # Random boot stagger to spread API load when multiple bots start simultaneously.
+        # Applies BEFORE init_markets() so even the first API calls are staggered.
+        boot_stagger = get_optional_live_value(self.config, "boot_stagger_seconds", None)
+        if boot_stagger is None:
+            exchange_lower = (self.exchange or "").lower()
+            if exchange_lower == "hyperliquid":
+                boot_stagger = 10.0
+            else:
+                boot_stagger = 0.0
+        try:
+            boot_stagger = float(boot_stagger)
+        except Exception:
+            boot_stagger = 0.0
+        if boot_stagger > 0:
+            delay = random.uniform(0, boot_stagger)
+            logging.info(
+                "[boot] stagger delay: waiting %.1fs before init (max=%.0fs)...",
+                delay, boot_stagger,
+            )
+            await asyncio.sleep(delay)
+
         await format_approved_ignored_coins(self.config, self.user_info["exchange"], quote=self.quote)
         await self.init_markets()
         # Staggered warmup of candles for approved symbols (large sets handled gracefully)
