@@ -4582,8 +4582,28 @@ class Passivbot:
         if not symbols:
             return ({}, None) if return_snapshot else {}
 
-        # 1m candles update once/min; 60s TTL avoids per-cycle burst of 70 parallel fetches.
-        last_prices = await self.cm.get_last_prices(symbols, max_age_ms=60_000)
+        # Get latest prices: prefer bulk fetch_tickers (1 API call for all symbols)
+        # over per-symbol get_current_close (N API calls). Falls back to CM if unavailable.
+        last_prices = {}
+        try:
+            if hasattr(self, "fetch_tickers"):
+                tickers = await self.fetch_tickers()
+                for sym in symbols:
+                    tick = tickers.get(sym)
+                    if tick and tick.get("last") is not None:
+                        last_prices[sym] = float(tick["last"])
+                # Feed prices into CM cache so downstream EMA/close lookups hit cache
+                now_ms = utc_ms()
+                for sym, price in last_prices.items():
+                    self.cm._current_close_cache[sym] = (price, int(now_ms))
+        except Exception as e:
+            logging.debug("bulk fetch_tickers failed, falling back to CM: %s", e)
+            last_prices = {}
+        # Fill any symbols still missing via CandlestickManager (individual fetches)
+        missing = [s for s in symbols if s not in last_prices or last_prices[s] <= 0.0]
+        if missing:
+            cm_prices = await self.cm.get_last_prices(missing, max_age_ms=10_000)
+            last_prices.update(cm_prices)
 
         # Ensure effective min cost is up to date.
         if not hasattr(self, "effective_min_cost") or not self.effective_min_cost:
