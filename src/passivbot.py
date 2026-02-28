@@ -4504,6 +4504,12 @@ class Passivbot:
             out: dict[float, float] = {}
             if not spans:
                 return out
+            # Skip network-bound work when we're already rate-limited
+            try:
+                if getattr(self.cm, "_rate_limit_until", 0) > time.time():
+                    return out
+            except Exception:
+                pass
             tasks = [asyncio.create_task(fn(symbol, sp)) for sp in spans]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for sp, res in zip(spans, results):
@@ -4515,7 +4521,8 @@ class Passivbot:
             return out
 
         async def ema_close(symbol: str, span: float) -> float:
-            return float(await self.cm.get_latest_ema_close(symbol, span=span, max_age_ms=30_000))
+            # 1m candles finalize once/min; 60s TTL avoids redundant network fetches.
+            return float(await self.cm.get_latest_ema_close(symbol, span=span, max_age_ms=60_000))
 
         async def ema_qv(symbol: str, span: float) -> float:
             return float(
@@ -4575,7 +4582,52 @@ class Passivbot:
         if not symbols:
             return ({}, None) if return_snapshot else {}
 
-        last_prices = await self.cm.get_last_prices(symbols, max_age_ms=10_000)
+        # Get latest prices: prefer bulk allMids (1 API call for all symbols)
+        # over per-symbol get_current_close (N API calls). Falls back to CM if unavailable.
+        last_prices = {}
+        try:
+            if (
+                hasattr(self, "cca")
+                and self.cca is not None
+                and self.exchange
+                and self.exchange.lower() == "hyperliquid"
+            ):
+                # Call allMids directly – much cheaper than fetch_tickers which tries
+                # to map ALL coins (including unmapped HIP-3 @NNN IDs → warning spam).
+                fetched = await self.cca.fetch(
+                    "https://api.hyperliquid.xyz/info",
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                    body=json.dumps({"type": "allMids"}),
+                )
+                # Build reverse map: coin_name → symbol (e.g. "BTC" → "BTC/USDC:USDC")
+                coin_to_sym = {v: k for k, v in self.symbol_ids.items()} if self.symbol_ids else {}
+                for coin, mid_str in fetched.items():
+                    sym = coin_to_sym.get(coin)
+                    if sym and sym in symbols:
+                        try:
+                            last_prices[sym] = float(mid_str)
+                        except (ValueError, TypeError):
+                            pass
+            elif hasattr(self, "fetch_tickers"):
+                tickers = await self.fetch_tickers()
+                for sym in symbols:
+                    tick = tickers.get(sym)
+                    if tick and tick.get("last") is not None:
+                        last_prices[sym] = float(tick["last"])
+            # Feed prices into CM cache so downstream EMA/close lookups hit cache
+            if last_prices:
+                now_ms = utc_ms()
+                for sym, price in last_prices.items():
+                    self.cm._current_close_cache[sym] = (price, int(now_ms))
+        except Exception as e:
+            logging.debug("bulk price fetch failed, falling back to CM: %s", e)
+            last_prices = {}
+        # Fill any symbols still missing via CandlestickManager (individual fetches)
+        missing = [s for s in symbols if s not in last_prices or last_prices[s] <= 0.0]
+        if missing:
+            cm_prices = await self.cm.get_last_prices(missing, max_age_ms=10_000)
+            last_prices.update(cm_prices)
 
         # Ensure effective min cost is up to date.
         if not hasattr(self, "effective_min_cost") or not self.effective_min_cost:
@@ -5588,7 +5640,9 @@ class Passivbot:
         only when its internal last refresh is older than the TTL. Fetches a small
         recent window ending at the latest finalized minute.
         """
-        max_age_ms = 10_000
+        # 1m candles only finalize once per minute; refreshing more often wastes API budget.
+        # Use 60s TTL so each symbol is fetched at most once per minute.
+        max_age_ms = 60_000
         try:
             now = utc_ms()
             end_ts = (now // ONE_MIN_MS) * ONE_MIN_MS - ONE_MIN_MS
@@ -5619,6 +5673,14 @@ class Passivbot:
                 throttle_ms=60_000,
             )
             for sym in symbols:
+                # If a 429 triggered a global backoff in the CandlestickManager,
+                # stop fetching remaining symbols; they will be refreshed next cycle.
+                if getattr(self.cm, '_rate_limit_until', 0) > time.time():
+                    logging.info(
+                        "[candle] active refresh aborted: rate-limited; "
+                        "remaining symbols deferred to next cycle"
+                    )
+                    break
                 try:
                     await self.cm.get_candles(
                         sym,

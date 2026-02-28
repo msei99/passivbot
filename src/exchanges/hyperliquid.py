@@ -198,22 +198,40 @@ class HyperliquidBot(CCXTBot):
         )
         return positions, balance
 
+    async def _get_positions_and_balance_cached(self):
+        """Fetch positions+balance with dedup: concurrent callers share one API call."""
+        if not hasattr(self, "_hl_fetch_lock"):
+            self._hl_fetch_lock = asyncio.Lock()
+        async with self._hl_fetch_lock:
+            # If another caller already fetched while we waited for the lock,
+            # return the cached result instead of making a second API call.
+            cached_gen = getattr(self, "_hl_cache_generation", 0)
+            my_gen = getattr(self, "_hl_my_generation", 0)
+            if cached_gen > my_gen and hasattr(self, "_hl_cached_result"):
+                return self._hl_cached_result
+            result = await self._fetch_positions_and_balance()
+            self._hl_cached_result = result
+            self._hl_cache_generation = cached_gen + 1
+            return result
+
     async def fetch_positions(self):
-        positions, balance = await self._fetch_positions_and_balance()
-        self._last_hl_positions_balance = (positions, balance)
-        self._hl_positions_balance_applied = False
+        # Mark a new generation so fetch_balance knows to wait for our result
+        self._hl_my_generation = getattr(self, "_hl_cache_generation", 0)
+        positions, balance = await self._get_positions_and_balance_cached()
+        self._last_hl_balance = balance
+        self._hl_balance_consumed = False
         return positions
 
     async def fetch_balance(self):
-        cached = getattr(self, "_last_hl_positions_balance", None)
-        applied = getattr(self, "_hl_positions_balance_applied", False)
-        if cached and not applied:
-            positions, balance = cached
-            self._hl_positions_balance_applied = True
-            return balance
-        positions, balance = await self._fetch_positions_and_balance()
-        self._last_hl_positions_balance = (positions, balance)
-        self._hl_positions_balance_applied = True
+        # Check if fetch_positions already got us a fresh balance
+        if getattr(self, "_last_hl_balance", None) is not None and not getattr(
+            self, "_hl_balance_consumed", True
+        ):
+            self._hl_balance_consumed = True
+            return self._last_hl_balance
+        # Otherwise fetch (will share API call via lock if fetch_positions is in flight)
+        self._hl_my_generation = getattr(self, "_hl_cache_generation", 0)
+        positions, balance = await self._get_positions_and_balance_cached()
         return balance
 
     async def fetch_tickers(self):
@@ -459,11 +477,11 @@ class HyperliquidBot(CCXTBot):
 
         Uses base class methods for isolated margin detection and leverage calculation.
         Adds Hyperliquid-specific vault address handling.
+        Calls are made sequentially with a small delay to avoid rate-limit bursts.
         """
-        coros_to_call_margin_mode = {}
         for symbol in symbols:
+            to_print = ""
             try:
-                # Use base class method for leverage calculation (handles isolated margin)
                 leverage = self._calc_leverage_for_symbol(symbol)
                 margin_mode = self._get_margin_mode_for_symbol(symbol)
 
@@ -471,25 +489,24 @@ class HyperliquidBot(CCXTBot):
                 if self.user_info["is_vault"]:
                     params["vaultAddress"] = self.user_info["wallet_address"]
 
-                coros_to_call_margin_mode[symbol] = asyncio.create_task(
-                    self.cca.set_margin_mode(margin_mode, symbol=symbol, params=params)
-                )
+                try:
+                    res = await self.cca.set_margin_mode(
+                        margin_mode, symbol=symbol, params=params
+                    )
+                    to_print = (
+                        f"margin={format_exchange_config_response(res)} ({margin_mode})"
+                    )
+                except Exception as e:
+                    if '"code":"59107"' in str(e):
+                        to_print = f"margin=ok (unchanged, {margin_mode})"
+                    else:
+                        logging.error(f"{symbol} error setting {margin_mode} mode {e}")
             except Exception as e:
                 logging.error(f"{symbol}: error setting margin mode and leverage {e}")
-        for symbol in symbols:
-            res = None
-            to_print = ""
-            margin_mode = self._get_margin_mode_for_symbol(symbol)
-            try:
-                res = await coros_to_call_margin_mode[symbol]
-                to_print += f"margin={format_exchange_config_response(res)} ({margin_mode})"
-            except Exception as e:
-                if '"code":"59107"' in str(e):
-                    to_print += f"margin=ok (unchanged, {margin_mode})"
-                else:
-                    logging.error(f"{symbol} error setting {margin_mode} mode {e}")
             if to_print:
                 logging.info(f"{symbol}: {to_print}")
+            # Small delay between margin-mode API calls to avoid rate-limit bursts
+            await asyncio.sleep(0.2)
 
     async def update_exchange_config(self):
         pass
