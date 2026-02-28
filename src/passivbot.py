@@ -4521,7 +4521,8 @@ class Passivbot:
             return out
 
         async def ema_close(symbol: str, span: float) -> float:
-            return float(await self.cm.get_latest_ema_close(symbol, span=span, max_age_ms=30_000))
+            # 1m candles finalize once/min; 60s TTL avoids redundant network fetches.
+            return float(await self.cm.get_latest_ema_close(symbol, span=span, max_age_ms=60_000))
 
         async def ema_qv(symbol: str, span: float) -> float:
             return float(
@@ -4581,7 +4582,8 @@ class Passivbot:
         if not symbols:
             return ({}, None) if return_snapshot else {}
 
-        last_prices = await self.cm.get_last_prices(symbols, max_age_ms=10_000)
+        # 1m candles update once/min; 60s TTL avoids per-cycle burst of 70 parallel fetches.
+        last_prices = await self.cm.get_last_prices(symbols, max_age_ms=60_000)
 
         # Ensure effective min cost is up to date.
         if not hasattr(self, "effective_min_cost") or not self.effective_min_cost:
@@ -5627,6 +5629,14 @@ class Passivbot:
                 throttle_ms=60_000,
             )
             for sym in symbols:
+                # If a 429 triggered a global backoff in the CandlestickManager,
+                # stop fetching remaining symbols; they will be refreshed next cycle.
+                if getattr(self.cm, '_rate_limit_until', 0) > time.time():
+                    logging.info(
+                        "[candle] active refresh aborted: rate-limited; "
+                        "remaining symbols deferred to next cycle"
+                    )
+                    break
                 try:
                     await self.cm.get_candles(
                         sym,
