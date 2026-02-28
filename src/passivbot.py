@@ -5594,7 +5594,9 @@ class Passivbot:
         only when its internal last refresh is older than the TTL. Fetches a small
         recent window ending at the latest finalized minute.
         """
-        max_age_ms = 10_000
+        # 1m candles only finalize once per minute; refreshing more often wastes API budget.
+        # Use 60s TTL so each symbol is fetched at most once per minute.
+        max_age_ms = 60_000
         try:
             now = utc_ms()
             end_ts = (now // ONE_MIN_MS) * ONE_MIN_MS - ONE_MIN_MS
