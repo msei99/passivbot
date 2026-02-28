@@ -4510,6 +4510,12 @@ class Passivbot:
             out: dict[float, float] = {}
             if not spans:
                 return out
+            # Skip network-bound work when we're already rate-limited
+            try:
+                if getattr(self.cm, "_rate_limit_until", 0) > time.time():
+                    return out
+            except Exception:
+                pass
             tasks = [asyncio.create_task(fn(symbol, sp)) for sp in spans]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for sp, res in zip(spans, results):

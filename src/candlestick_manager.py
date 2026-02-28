@@ -4798,9 +4798,13 @@ class CandlestickManager:
                 )
                 need_refresh = last_ref == 0 or (now - last_ref) > int(max_age_ms)
                 if not need_refresh:
-                    # If our cached data doesn't reach the requested end_ts,
-                    # force a refresh even if the last refresh is recent.
-                    if last_final and last_final < int(end_ts):
+                    # Only force refresh if cached data lags by MORE than 1 candle
+                    # period.  Being exactly 1 minute behind is normal when a new
+                    # minute boundary crosses (e.g. right after warmup).  The TTL
+                    # alone governs refresh timing in that case — avoiding a
+                    # thundering-herd where all symbols refresh simultaneously on
+                    # minute transitions.
+                    if last_final and (int(end_ts) - int(last_final)) > ONE_MIN_MS:
                         need_refresh = True
                 if need_refresh:
                     await self.refresh(symbol, through_ts=end_ts)

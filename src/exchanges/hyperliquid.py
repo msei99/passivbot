@@ -494,11 +494,11 @@ class HyperliquidBot(CCXTBot):
 
         Uses base class methods for isolated margin detection and leverage calculation.
         Adds Hyperliquid-specific vault address handling.
+        Calls are made sequentially with a small delay to avoid rate-limit bursts.
         """
-        coros_to_call_margin_mode = {}
         for symbol in symbols:
+            to_print = ""
             try:
-                # Use base class method for leverage calculation (handles isolated margin)
                 leverage = self._calc_leverage_for_symbol(symbol)
                 margin_mode = self._get_margin_mode_for_symbol(symbol)
 
@@ -506,25 +506,24 @@ class HyperliquidBot(CCXTBot):
                 if self.user_info["is_vault"]:
                     params["vaultAddress"] = self.user_info["wallet_address"]
 
-                coros_to_call_margin_mode[symbol] = asyncio.create_task(
-                    self.cca.set_margin_mode(margin_mode, symbol=symbol, params=params)
-                )
+                try:
+                    res = await self.cca.set_margin_mode(
+                        margin_mode, symbol=symbol, params=params
+                    )
+                    to_print = (
+                        f"margin={format_exchange_config_response(res)} ({margin_mode})"
+                    )
+                except Exception as e:
+                    if '"code":"59107"' in str(e):
+                        to_print = f"margin=ok (unchanged, {margin_mode})"
+                    else:
+                        logging.error(f"{symbol} error setting {margin_mode} mode {e}")
             except Exception as e:
                 logging.error(f"{symbol}: error setting margin mode and leverage {e}")
-        for symbol in symbols:
-            res = None
-            to_print = ""
-            margin_mode = self._get_margin_mode_for_symbol(symbol)
-            try:
-                res = await coros_to_call_margin_mode[symbol]
-                to_print += f"margin={format_exchange_config_response(res)} ({margin_mode})"
-            except Exception as e:
-                if '"code":"59107"' in str(e):
-                    to_print += f"margin=ok (unchanged, {margin_mode})"
-                else:
-                    logging.error(f"{symbol} error setting {margin_mode} mode {e}")
             if to_print:
                 logging.info(f"{symbol}: {to_print}")
+            # Small delay between margin-mode API calls to avoid rate-limit bursts
+            await asyncio.sleep(0.2)
 
     async def update_exchange_config(self):
         pass
