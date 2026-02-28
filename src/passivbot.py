@@ -1531,6 +1531,18 @@ class Passivbot:
             # Enable batch mode for candle replacement logs during warmup
             self.cm.start_candle_replace_batch()
 
+        # Optional per-fetch delay to reduce API pressure during warmup.
+        # Configured via warmup_fetch_delay_ms; defaults to 200ms for Hyperliquid, 0 otherwise.
+        fetch_delay_ms = get_optional_live_value(self.config, "warmup_fetch_delay_ms", None)
+        try:
+            fetch_delay_ms = float(fetch_delay_ms) if fetch_delay_ms is not None else None
+        except Exception:
+            fetch_delay_ms = None
+        if fetch_delay_ms is None:
+            exchange_lower = self.exchange.lower() if self.exchange else ""
+            fetch_delay_ms = 200.0 if exchange_lower == "hyperliquid" else 0.0
+        fetch_delay_s = max(0.0, float(fetch_delay_ms) / 1000.0)
+
         async def one(sym: str):
             nonlocal completed, last_log_ms
             async with sem:
@@ -1550,6 +1562,8 @@ class Passivbot:
                 except Exception:
                     pass
                 finally:
+                    if fetch_delay_s > 0:
+                        await asyncio.sleep(fetch_delay_s)
                     completed += 1
                     # Time-based throttle: log every ~2s or on completion
                     if n > 20:
@@ -1589,6 +1603,9 @@ class Passivbot:
                     )
                 except Exception:
                     pass
+                finally:
+                    if fetch_delay_s > 0:
+                        await asyncio.sleep(fetch_delay_s)
 
         await asyncio.gather(*(warm_hour(s) for s in symbols))
 
