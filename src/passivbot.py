@@ -953,6 +953,28 @@ class Passivbot:
         """Initialise state, warm cached data, and launch background loops."""
         self._log_startup_banner()
         logging.info("[boot] starting bot %s...", self.exchange)
+
+        # Random boot stagger to spread API load when multiple bots start simultaneously.
+        # Applies BEFORE init_markets() so even the first API calls are staggered.
+        boot_stagger = get_optional_live_value(self.config, "boot_stagger_seconds", None)
+        if boot_stagger is None:
+            exchange_lower = (self.exchange or "").lower()
+            if exchange_lower == "hyperliquid":
+                boot_stagger = 30.0
+            else:
+                boot_stagger = 0.0
+        try:
+            boot_stagger = float(boot_stagger)
+        except Exception:
+            boot_stagger = 0.0
+        if boot_stagger > 0:
+            delay = random.uniform(0, boot_stagger)
+            logging.info(
+                "[boot] stagger delay: waiting %.1fs before init (max=%.0fs)...",
+                delay, boot_stagger,
+            )
+            await asyncio.sleep(delay)
+
         await format_approved_ignored_coins(self.config, self.user_info["exchange"], quote=self.quote)
         await self.init_markets()
         # Staggered warmup of candles for approved symbols (large sets handled gracefully)
@@ -1400,7 +1422,7 @@ class Passivbot:
                 # Exchange-specific defaults: Hyperliquid has stricter rate limits
                 exchange_lower = self.exchange.lower() if self.exchange else ""
                 if exchange_lower == "hyperliquid":
-                    concurrency = 2
+                    concurrency = 1
                 else:
                     concurrency = 8
         concurrency = max(1, int(concurrency))
@@ -1531,6 +1553,18 @@ class Passivbot:
             # Enable batch mode for candle replacement logs during warmup
             self.cm.start_candle_replace_batch()
 
+        # Optional per-fetch delay to reduce API pressure during warmup.
+        # Configured via warmup_fetch_delay_ms; defaults to 200ms for Hyperliquid, 0 otherwise.
+        fetch_delay_ms = get_optional_live_value(self.config, "warmup_fetch_delay_ms", None)
+        try:
+            fetch_delay_ms = float(fetch_delay_ms) if fetch_delay_ms is not None else None
+        except Exception:
+            fetch_delay_ms = None
+        if fetch_delay_ms is None:
+            exchange_lower = self.exchange.lower() if self.exchange else ""
+            fetch_delay_ms = 200.0 if exchange_lower == "hyperliquid" else 0.0
+        fetch_delay_s = max(0.0, float(fetch_delay_ms) / 1000.0)
+
         async def one(sym: str):
             nonlocal completed, last_log_ms
             async with sem:
@@ -1550,6 +1584,8 @@ class Passivbot:
                 except Exception:
                     pass
                 finally:
+                    if fetch_delay_s > 0:
+                        await asyncio.sleep(fetch_delay_s)
                     completed += 1
                     # Time-based throttle: log every ~2s or on completion
                     if n > 20:
@@ -1589,6 +1625,9 @@ class Passivbot:
                     )
                 except Exception:
                     pass
+                finally:
+                    if fetch_delay_s > 0:
+                        await asyncio.sleep(fetch_delay_s)
 
         await asyncio.gather(*(warm_hour(s) for s in symbols))
 
@@ -5483,6 +5522,18 @@ class Passivbot:
             max_warmup_minutes = 0
         span_buffer = 1.0 + max(0.0, warmup_ratio)
 
+        # Delay between individual candle fetches to spread API load across time.
+        # Uses the same warmup_fetch_delay_ms config; defaults to 200ms for Hyperliquid.
+        fetch_delay_ms = get_optional_live_value(self.config, "warmup_fetch_delay_ms", None)
+        try:
+            fetch_delay_ms = float(fetch_delay_ms) if fetch_delay_ms is not None else None
+        except Exception:
+            fetch_delay_ms = None
+        if fetch_delay_ms is None:
+            exchange_lower = self.exchange.lower() if self.exchange else ""
+            fetch_delay_ms = 200.0 if exchange_lower == "hyperliquid" else 0.0
+        fetch_delay_s = max(0.0, float(fetch_delay_ms) / 1000.0)
+
         for sym in to_refresh:
             try:
                 max_span = 0.0
@@ -5519,6 +5570,8 @@ class Passivbot:
                     strict=False,
                     max_lookback_candles=win,
                 )
+                if fetch_delay_s > 0:
+                    await asyncio.sleep(fetch_delay_s)
             except TimeoutError as exc:
                 logging.warning(
                     "Timed out acquiring candle lock for %s; forager refresh will retry (%s)",
@@ -5546,6 +5599,17 @@ class Passivbot:
                 window = 120
             start_ts = end_ts - ONE_MIN_MS * window
 
+            # Per-fetch delay to spread API load (same config as warmup/forager refresh).
+            fetch_delay_ms = get_optional_live_value(self.config, "warmup_fetch_delay_ms", None)
+            try:
+                fetch_delay_ms = float(fetch_delay_ms) if fetch_delay_ms is not None else None
+            except Exception:
+                fetch_delay_ms = None
+            if fetch_delay_ms is None:
+                exchange_lower = self.exchange.lower() if self.exchange else ""
+                fetch_delay_ms = 200.0 if exchange_lower == "hyperliquid" else 0.0
+            fetch_delay_s = max(0.0, float(fetch_delay_ms) / 1000.0)
+
             symbols = sorted(set(self.active_symbols))
             self._maybe_log_candle_refresh(
                 "active refresh",
@@ -5564,6 +5628,8 @@ class Passivbot:
                         strict=False,
                         max_lookback_candles=window,
                     )
+                    if fetch_delay_s > 0:
+                        await asyncio.sleep(fetch_delay_s)
                 except TimeoutError as exc:
                     logging.warning(
                         "Timed out acquiring candle lock for %s; will retry next cycle (%s)",
