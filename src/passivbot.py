@@ -4582,22 +4582,46 @@ class Passivbot:
         if not symbols:
             return ({}, None) if return_snapshot else {}
 
-        # Get latest prices: prefer bulk fetch_tickers (1 API call for all symbols)
+        # Get latest prices: prefer bulk allMids (1 API call for all symbols)
         # over per-symbol get_current_close (N API calls). Falls back to CM if unavailable.
         last_prices = {}
         try:
-            if hasattr(self, "fetch_tickers"):
+            if (
+                hasattr(self, "cca")
+                and self.cca is not None
+                and self.exchange
+                and self.exchange.lower() == "hyperliquid"
+            ):
+                # Call allMids directly – much cheaper than fetch_tickers which tries
+                # to map ALL coins (including unmapped HIP-3 @NNN IDs → warning spam).
+                fetched = await self.cca.fetch(
+                    "https://api.hyperliquid.xyz/info",
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                    body=json.dumps({"type": "allMids"}),
+                )
+                # Build reverse map: coin_name → symbol (e.g. "BTC" → "BTC/USDC:USDC")
+                coin_to_sym = {v: k for k, v in self.symbol_ids.items()} if self.symbol_ids else {}
+                for coin, mid_str in fetched.items():
+                    sym = coin_to_sym.get(coin)
+                    if sym and sym in symbols:
+                        try:
+                            last_prices[sym] = float(mid_str)
+                        except (ValueError, TypeError):
+                            pass
+            elif hasattr(self, "fetch_tickers"):
                 tickers = await self.fetch_tickers()
                 for sym in symbols:
                     tick = tickers.get(sym)
                     if tick and tick.get("last") is not None:
                         last_prices[sym] = float(tick["last"])
-                # Feed prices into CM cache so downstream EMA/close lookups hit cache
+            # Feed prices into CM cache so downstream EMA/close lookups hit cache
+            if last_prices:
                 now_ms = utc_ms()
                 for sym, price in last_prices.items():
                     self.cm._current_close_cache[sym] = (price, int(now_ms))
         except Exception as e:
-            logging.debug("bulk fetch_tickers failed, falling back to CM: %s", e)
+            logging.debug("bulk price fetch failed, falling back to CM: %s", e)
             last_prices = {}
         # Fill any symbols still missing via CandlestickManager (individual fetches)
         missing = [s for s in symbols if s not in last_prices or last_prices[s] <= 0.0]
