@@ -5,6 +5,7 @@ import traceback
 import ccxt.pro as ccxt_pro
 import ccxt.async_support as ccxt_async
 import passivbot_rust as pbr
+from ccxt.base.errors import RateLimitExceeded
 
 from exchanges.ccxt_bot import CCXTBot, format_exchange_config_response
 from passivbot import logging
@@ -132,17 +133,33 @@ class HyperliquidBot(CCXTBot):
 
     async def watch_orders(self):
         res = None
+        _ws_consecutive_rate_limits = 0
         while True:
             try:
                 if self.stop_websocket:
                     break
                 res = await self.ccp.watch_orders()
+                _ws_consecutive_rate_limits = 0  # reset on success
                 for i in range(len(res)):
                     res[i]["position_side"] = self.determine_pos_side(res[i])
                     res[i]["qty"] = res[i]["amount"]
                 self.handle_order_update(res)
+            except RateLimitExceeded:
+                self._health_ws_reconnects += 1
+                self._health_rate_limits += 1
+                _ws_consecutive_rate_limits += 1
+                backoff = min(30, 2 ** _ws_consecutive_rate_limits)
+                logging.warning(
+                    "[ws] %s: rate limited (reconnect #%d), backing off %.0fs...",
+                    self.exchange,
+                    self._health_ws_reconnects,
+                    backoff,
+                )
+                await asyncio.sleep(backoff)
+                logging.info("[ws] %s: reconnecting after rate limit...", self.exchange)
             except Exception as e:
                 self._health_ws_reconnects += 1
+                _ws_consecutive_rate_limits = 0
                 logging.warning(
                     "[ws] %s: connection lost (reconnect #%d), retrying in 1s: %s",
                     self.exchange,
