@@ -960,7 +960,7 @@ class Passivbot:
         if boot_stagger is None:
             exchange_lower = (self.exchange or "").lower()
             if exchange_lower == "hyperliquid":
-                boot_stagger = 10.0
+                boot_stagger = 30.0
             else:
                 boot_stagger = 0.0
         try:
@@ -1422,7 +1422,7 @@ class Passivbot:
                 # Exchange-specific defaults: Hyperliquid has stricter rate limits
                 exchange_lower = self.exchange.lower() if self.exchange else ""
                 if exchange_lower == "hyperliquid":
-                    concurrency = 2
+                    concurrency = 1
                 else:
                     concurrency = 8
         concurrency = max(1, int(concurrency))
@@ -1562,7 +1562,7 @@ class Passivbot:
             fetch_delay_ms = None
         if fetch_delay_ms is None:
             exchange_lower = self.exchange.lower() if self.exchange else ""
-            fetch_delay_ms = 200.0 if exchange_lower == "hyperliquid" else 0.0
+            fetch_delay_ms = 500.0 if exchange_lower == "hyperliquid" else 0.0
         fetch_delay_s = max(0.0, float(fetch_delay_ms) / 1000.0)
 
         async def one(sym: str):
@@ -5537,7 +5537,7 @@ class Passivbot:
             fetch_delay_ms = None
         if fetch_delay_ms is None:
             exchange_lower = self.exchange.lower() if self.exchange else ""
-            fetch_delay_ms = 200.0 if exchange_lower == "hyperliquid" else 0.0
+            fetch_delay_ms = 500.0 if exchange_lower == "hyperliquid" else 0.0
         fetch_delay_s = max(0.0, float(fetch_delay_ms) / 1000.0)
 
         for sym in to_refresh:
