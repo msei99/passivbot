@@ -2911,6 +2911,11 @@ class CandlestickManager:
                 )
                 if getattr(self, "_net_sem", None) is not None:
                     async with self._net_sem:  # type: ignore[attr-defined]
+                        # Re-check rate limit after acquiring semaphore.
+                        # Tasks may have been queued before a 429 set the
+                        # global backoff; honour it now instead of firing
+                        # immediately after the semaphore unblocks.
+                        await self._apply_rate_limit_backoff()
                         res = await ex.fetch_ohlcv(
                             symbol,
                             timeframe=tf_norm,

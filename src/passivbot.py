@@ -4345,12 +4345,12 @@ class Passivbot:
                     "bot_params": self._bot_params_to_rust_dict(pside, symbol),
                 }
 
-            m1_close_pairs = [[float(k), float(v)] for k, v in sorted(m1_close_emas[symbol].items())]
+            m1_close_pairs = [[float(k), float(v)] for k, v in sorted(m1_close_emas.get(symbol, {}).items())]
             m1_volume_pairs = [
-                [float(k), float(v)] for k, v in sorted(m1_volume_emas[symbol].items())
+                [float(k), float(v)] for k, v in sorted(m1_volume_emas.get(symbol, {}).items())
             ]
-            m1_lr_pairs = [[float(k), float(v)] for k, v in sorted(m1_log_range_emas[symbol].items())]
-            h1_lr_pairs = [[float(k), float(v)] for k, v in sorted(h1_log_range_emas[symbol].items())]
+            m1_lr_pairs = [[float(k), float(v)] for k, v in sorted(m1_log_range_emas.get(symbol, {}).items())]
+            h1_lr_pairs = [[float(k), float(v)] for k, v in sorted(h1_log_range_emas.get(symbol, {}).items())]
 
             input_dict["symbols"].append(
                 {
@@ -4543,34 +4543,43 @@ class Passivbot:
                 await self.cm.get_latest_ema_log_range(symbol, span=span, tf="1h", max_age_ms=600_000)
             )
 
-        close_tasks = {
-            sym: asyncio.create_task(fetch_map(sym, sorted(need_close_spans[sym]), ema_close))
-            for sym in symbols
-        }
-        h1_lr_tasks = {
-            sym: asyncio.create_task(fetch_map(sym, sorted(need_h1_lr_spans[sym]), ema_lr_1h))
-            for sym in symbols
-        }
-        vol_tasks = {
-            sym: asyncio.create_task(fetch_map(sym, m1_volume_spans, ema_qv)) for sym in symbols
-        }
-        lr1m_tasks = {
-            sym: asyncio.create_task(fetch_map(sym, m1_lr_spans, ema_lr_1m)) for sym in symbols
-        }
+        # Process symbols sequentially to avoid firing all tasks at once.
+        # Within each symbol the 4 EMA categories still run in parallel
+        # (bounded: ~4 categories × ~3 spans ≈ 12 tasks per symbol).
+        # Cached data returns instantly, so the sequential loop adds no
+        # latency for warm symbols.  For cold symbols the gated approach
+        # prevents a burst of hundreds of concurrent API calls.
+        #
+        # Ordering: symbols with open positions first (they need EMA data
+        # for correct order calculation), remaining symbols shuffled to
+        # avoid alphabetic starvation.  We do NOT break on rate-limit;
+        # fetch_map already returns {} when rate-limited, and cached
+        # symbols cost zero network calls regardless.
+        symbols_with_pos = [s for s in symbols if self.has_position(symbol=s)]
+        symbols_without_pos = [s for s in symbols if s not in symbols_with_pos]
+        random.shuffle(symbols_without_pos)
+        ordered_symbols = symbols_with_pos + symbols_without_pos
 
         m1_close_emas: dict[str, dict[float, float]] = {}
         m1_volume_emas: dict[str, dict[float, float]] = {}
         m1_log_range_emas: dict[str, dict[float, float]] = {}
         h1_log_range_emas: dict[str, dict[float, float]] = {}
-        for sym in symbols:
-            m1_close_emas[sym] = await close_tasks[sym]
-            h1_log_range_emas[sym] = await h1_lr_tasks[sym]
-            m1_volume_emas[sym] = await vol_tasks[sym]
-            m1_log_range_emas[sym] = await lr1m_tasks[sym]
+        for sym in ordered_symbols:
+            close_result, h1_lr_result, vol_result, lr1m_result = await asyncio.gather(
+                fetch_map(sym, sorted(need_close_spans[sym]), ema_close),
+                fetch_map(sym, sorted(need_h1_lr_spans[sym]), ema_lr_1h),
+                fetch_map(sym, m1_volume_spans, ema_qv),
+                fetch_map(sym, m1_lr_spans, ema_lr_1m),
+            )
+            m1_close_emas[sym] = close_result
+            h1_log_range_emas[sym] = h1_lr_result
+            m1_volume_emas[sym] = vol_result
+            m1_log_range_emas[sym] = lr1m_result
 
         # Convenience: compute the single-span values used by legacy forager logging.
-        volumes_long = {s: m1_volume_emas[s].get(vol_span_long, 0.0) for s in symbols}
-        log_ranges_long = {s: m1_log_range_emas[s].get(lr_span_long, 0.0) for s in symbols}
+        # Symbols skipped due to rate limiting won't be in the dicts; default to 0.
+        volumes_long = {s: m1_volume_emas.get(s, {}).get(vol_span_long, 0.0) for s in symbols}
+        log_ranges_long = {s: m1_log_range_emas.get(s, {}).get(lr_span_long, 0.0) for s in symbols}
 
         return (
             m1_close_emas,
@@ -4721,12 +4730,12 @@ class Passivbot:
                 }
 
             # Build EMA bundle for this symbol.
-            m1_close_pairs = [[float(k), float(v)] for k, v in sorted(m1_close_emas[symbol].items())]
+            m1_close_pairs = [[float(k), float(v)] for k, v in sorted(m1_close_emas.get(symbol, {}).items())]
             m1_volume_pairs = [
-                [float(k), float(v)] for k, v in sorted(m1_volume_emas[symbol].items())
+                [float(k), float(v)] for k, v in sorted(m1_volume_emas.get(symbol, {}).items())
             ]
-            m1_lr_pairs = [[float(k), float(v)] for k, v in sorted(m1_log_range_emas[symbol].items())]
-            h1_lr_pairs = [[float(k), float(v)] for k, v in sorted(h1_log_range_emas[symbol].items())]
+            m1_lr_pairs = [[float(k), float(v)] for k, v in sorted(m1_log_range_emas.get(symbol, {}).items())]
+            h1_lr_pairs = [[float(k), float(v)] for k, v in sorted(h1_log_range_emas.get(symbol, {}).items())]
 
             input_dict["symbols"].append(
                 {
@@ -5671,6 +5680,13 @@ class Passivbot:
             fetch_delay_s = max(0.0, float(fetch_delay_ms) / 1000.0)
 
             symbols = sorted(set(self.active_symbols))
+            # Prioritize symbols with open positions (need fresh candles for
+            # correct order calculation), shuffle the rest to avoid alphabetic
+            # starvation when a 429 forces cache-only for late symbols.
+            symbols_with_pos = [s for s in symbols if self.has_position(symbol=s)]
+            symbols_without_pos = [s for s in symbols if s not in symbols_with_pos]
+            random.shuffle(symbols_without_pos)
+            ordered_symbols = symbols_with_pos + symbols_without_pos
             self._maybe_log_candle_refresh(
                 "active refresh",
                 symbols,
@@ -5678,15 +5694,14 @@ class Passivbot:
                 refreshed=len(symbols),
                 throttle_ms=60_000,
             )
-            for sym in symbols:
+            for sym in ordered_symbols:
                 # If a 429 triggered a global backoff in the CandlestickManager,
-                # stop fetching remaining symbols; they will be refreshed next cycle.
+                # skip this symbol; CandlestickManager.get_candles would wait for
+                # the backoff anyway but there's no point spending the delay budget
+                # here.  Cached symbols still get through on next cycle; the
+                # position-first + shuffle ordering prevents systematic starvation.
                 if getattr(self.cm, '_rate_limit_until', 0) > time.time():
-                    logging.info(
-                        "[candle] active refresh aborted: rate-limited; "
-                        "remaining symbols deferred to next cycle"
-                    )
-                    break
+                    continue
                 try:
                     await self.cm.get_candles(
                         sym,
