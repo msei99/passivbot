@@ -2645,17 +2645,17 @@ class HyperliquidFetcher(BaseFetcher):
                 rate_limit_retries += 1
                 if rate_limit_retries > max_rate_limit_retries:
                     logger.warning(
-                        "HyperliquidFetcher.fetch: too many rate limit retries (%d), aborting",
+                        "HyperliquidFetcher.fetch: too many rate limit retries (%d), aborting pagination",
                         rate_limit_retries,
                     )
-                    break
+                    raise
                 logger.debug(
                     "HyperliquidFetcher.fetch: rate limit exceeded (retry %d/%d), sleeping (%s)",
                     rate_limit_retries,
                     max_rate_limit_retries,
                     exc,
                 )
-                await asyncio.sleep(2.0 * rate_limit_retries)
+                await asyncio.sleep(min(30.0, 2.0 ** rate_limit_retries))
                 # Reset prev_params so the retry is not flagged as repeated
                 prev_params = None
                 continue

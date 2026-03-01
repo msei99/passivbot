@@ -2655,13 +2655,28 @@ class Passivbot:
         self.set_wallet_exposure_limits()
         previous_PB_modes = deepcopy(self.PB_modes) if hasattr(self, "PB_modes") else None
         self.PB_modes = {"long": {}, "short": {}}
+        # Compute forager fetch budget once before the per-side loop and split
+        # evenly between long and short.  Without this, the first side (long)
+        # drains the entire token bucket and the second side (short) always
+        # gets budget=0, starving its ranking freshness.
+        _n_sides = 2
+        _pre_budget = None
+        _pre_max_calls = get_optional_live_value(self.config, "max_ohlcv_fetches_per_minute", 0)
+        try:
+            _pre_max_calls = int(_pre_max_calls) if _pre_max_calls is not None else 0
+        except Exception:
+            _pre_max_calls = 0
+        if _pre_max_calls > 0:
+            _total_budget = self._forager_refresh_budget(_pre_max_calls)
+            _pre_budget = max(1, _total_budget // _n_sides) if _total_budget > 0 else 0
+
         for pside, other_pside in [("long", "short"), ("short", "long")]:
             if self.is_forager_mode(pside):
                 await self.update_first_timestamps()
             for symbol in self.coin_overrides:
                 if flag := self.get_forced_PB_mode(pside, symbol):
                     self.PB_modes[pside][symbol] = flag
-            ideal_coins = await self.get_filtered_coins(pside)
+            ideal_coins = await self.get_filtered_coins(pside, fetch_budget=_pre_budget)
             slots_filled = {
                 k for k, v in self.PB_modes[pside].items() if v in ["normal", "graceful_stop"]
             }
@@ -2811,7 +2826,7 @@ class Passivbot:
                         pass
                     logging.info("[mode] %s %s%s", change_type, elm, info_suffix)
 
-    async def get_filtered_coins(self, pside: str) -> List[str]:
+    async def get_filtered_coins(self, pside: str, *, fetch_budget: int = None) -> List[str]:
         """Select ideal coins for a side using EMA-based volume and log-range filters.
 
         Steps (for forager mode):
@@ -2856,11 +2871,10 @@ class Passivbot:
                 max_age_ms = max(60_000, rate_limit_age_ms) if max_calls > 0 else 60_000
             else:
                 max_age_ms = self._forager_target_staleness_ms(len(candidates), max_calls)
-            # Compute fetch budget: limits how many symbols may trigger a network
-            # request in this ranking cycle (prevents burst of 68 fetches on restart).
-            fetch_budget = (
-                self._forager_refresh_budget(max_calls) if max_calls > 0 else None
-            )
+            # Use pre-computed per-side budget from caller if available;
+            # otherwise fall back to computing it here (for backward compat).
+            if fetch_budget is None and max_calls > 0:
+                fetch_budget = self._forager_refresh_budget(max_calls)
             if clip_pct > 0.0:
                 volumes, log_ranges = await self.calc_volumes_and_log_ranges(
                     pside,
@@ -4662,9 +4676,9 @@ class Passivbot:
                         last_prices[sym] = float(tick["last"])
             # Feed prices into CM cache so downstream EMA/close lookups hit cache
             if last_prices:
-                now_ms = utc_ms()
+                now_ms = int(utc_ms())
                 for sym, price in last_prices.items():
-                    self.cm._current_close_cache[sym] = (price, int(now_ms))
+                    self.cm.set_current_close(sym, price, now_ms)
         except Exception as e:
             logging.debug("bulk price fetch failed, falling back to CM: %s", e)
             last_prices = {}
@@ -5750,7 +5764,7 @@ class Passivbot:
                 # the backoff anyway but there's no point spending the delay budget
                 # here.  Cached symbols still get through on next cycle; the
                 # position-first + shuffle ordering prevents systematic starvation.
-                if getattr(self.cm, '_rate_limit_until', 0) > time.time():
+                if self.cm.is_rate_limited():
                     continue
                 try:
                     await self.cm.get_candles(

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import random
 import traceback
 
 import ccxt.pro as ccxt_pro
@@ -40,6 +41,8 @@ class HyperliquidBot(CCXTBot):
             self.user_info["is_vault"] = False
         self.max_n_concurrent_ohlcvs_1m_updates = 2
         self.custom_id_max_length = 34
+        self._hl_fetch_lock = asyncio.Lock()
+        self._hl_cache_generation = 0
 
     def create_ccxt_sessions(self):
         creds = {
@@ -148,7 +151,7 @@ class HyperliquidBot(CCXTBot):
                 self._health_ws_reconnects += 1
                 self._health_rate_limits += 1
                 _ws_consecutive_rate_limits += 1
-                backoff = min(30, 2 ** _ws_consecutive_rate_limits)
+                backoff = min(30, 2 ** _ws_consecutive_rate_limits) + random.uniform(0, 1)
                 logging.warning(
                     "[ws] %s: rate limited (reconnect #%d), backing off %.0fs...",
                     self.exchange,
@@ -222,10 +225,8 @@ class HyperliquidBot(CCXTBot):
         acquiring the lock.  If another caller completed a fetch in the
         meantime (cache_generation advanced), we return the cached result.
         """
-        if not hasattr(self, "_hl_fetch_lock"):
-            self._hl_fetch_lock = asyncio.Lock()
         async with self._hl_fetch_lock:
-            cached_gen = getattr(self, "_hl_cache_generation", 0)
+            cached_gen = self._hl_cache_generation
             if cached_gen > my_gen and hasattr(self, "_hl_cached_result"):
                 return self._hl_cached_result
             result = await self._fetch_positions_and_balance()
@@ -235,7 +236,7 @@ class HyperliquidBot(CCXTBot):
 
     async def fetch_positions(self):
         # Snapshot generation *before* lock so each caller tracks its own view.
-        my_gen = getattr(self, "_hl_cache_generation", 0)
+        my_gen = self._hl_cache_generation
         positions, balance = await self._get_positions_and_balance_cached(my_gen)
         self._last_hl_balance = balance
         self._hl_balance_consumed = False
@@ -249,7 +250,7 @@ class HyperliquidBot(CCXTBot):
             self._hl_balance_consumed = True
             return self._last_hl_balance
         # Snapshot generation *before* lock so each caller tracks its own view.
-        my_gen = getattr(self, "_hl_cache_generation", 0)
+        my_gen = self._hl_cache_generation
         positions, balance = await self._get_positions_and_balance_cached(my_gen)
         return balance
 

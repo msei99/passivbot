@@ -5709,6 +5709,14 @@ class CandlestickManager:
         self._current_close_cache[symbol] = (float(price), int(now))
         return float(price)
 
+    def set_current_close(self, symbol: str, price: float, timestamp_ms: int) -> None:
+        """Inject a price into the current-close cache (e.g. from a bulk API call)."""
+        self._current_close_cache[symbol] = (float(price), int(timestamp_ms))
+
+    def is_rate_limited(self) -> bool:
+        """Return True if a global rate-limit backoff is active."""
+        return self._rate_limit_until > time.time()
+
     # ----- EMA helpers -----
 
     def _ema(self, values: np.ndarray, span: float) -> float:
