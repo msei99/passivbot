@@ -4386,29 +4386,12 @@ class Passivbot:
                     "bot_params": self._bot_params_to_rust_dict(pside, symbol),
                 }
 
-            m1_close_pairs = [[float(k), float(v)] for k, v in sorted(m1_close_emas.get(symbol, {}).items())]
+            m1_close_pairs = [[float(k), float(v)] for k, v in sorted(m1_close_emas[symbol].items())]
             m1_volume_pairs = [
-                [float(k), float(v)] for k, v in sorted(m1_volume_emas.get(symbol, {}).items())
+                [float(k), float(v)] for k, v in sorted(m1_volume_emas[symbol].items())
             ]
-            m1_lr_pairs = [[float(k), float(v)] for k, v in sorted(m1_log_range_emas.get(symbol, {}).items())]
-            h1_lr_pairs = [[float(k), float(v)] for k, v in sorted(h1_log_range_emas.get(symbol, {}).items())]
-
-            # Guard: skip symbols with completely empty EMA data and no position
-            # to prevent MissingEma crash in the Rust orchestrator.
-            if not m1_close_pairs and not m1_lr_pairs and not m1_volume_pairs and not h1_lr_pairs:
-                has_pos = self.has_position(symbol=symbol)
-                if not has_pos:
-                    logging.debug(
-                        "[ema] skipping %s from orchestrator input: no EMA data and no position",
-                        symbol,
-                    )
-                    continue
-                else:
-                    logging.warning(
-                        "[ema] %s has open position but ALL EMA data is empty; "
-                        "orchestrator may fail",
-                        symbol,
-                    )
+            m1_lr_pairs = [[float(k), float(v)] for k, v in sorted(m1_log_range_emas[symbol].items())]
+            h1_lr_pairs = [[float(k), float(v)] for k, v in sorted(h1_log_range_emas[symbol].items())]
 
             input_dict["symbols"].append(
                 {
@@ -4572,10 +4555,6 @@ class Passivbot:
             out: dict[float, float] = {}
             if not spans:
                 return out
-            # Do NOT skip when rate-limited: CM functions return cached data
-            # instantly if max_age_ms is satisfied (common case).  An early
-            # abort would prevent *all* cached-data access and cause MissingEma
-            # crashes for symbols with open positions.
             for sp in spans:
                 span = float(sp)
                 try:
@@ -4757,9 +4736,8 @@ class Passivbot:
             raise errors[0][1]
 
         # Convenience: compute the single-span values used by legacy forager logging.
-        # Symbols skipped due to rate limiting won't be in the dicts; default to 0.
-        volumes_long = {s: m1_volume_emas.get(s, {}).get(vol_span_long, 0.0) for s in symbols}
-        log_ranges_long = {s: m1_log_range_emas.get(s, {}).get(lr_span_long, 0.0) for s in symbols}
+        volumes_long = {s: m1_volume_emas[s].get(vol_span_long, 0.0) for s in symbols}
+        log_ranges_long = {s: m1_log_range_emas[s].get(lr_span_long, 0.0) for s in symbols}
 
         return (
             m1_close_emas,
@@ -4910,32 +4888,12 @@ class Passivbot:
                 }
 
             # Build EMA bundle for this symbol.
-            m1_close_pairs = [[float(k), float(v)] for k, v in sorted(m1_close_emas.get(symbol, {}).items())]
+            m1_close_pairs = [[float(k), float(v)] for k, v in sorted(m1_close_emas[symbol].items())]
             m1_volume_pairs = [
-                [float(k), float(v)] for k, v in sorted(m1_volume_emas.get(symbol, {}).items())
+                [float(k), float(v)] for k, v in sorted(m1_volume_emas[symbol].items())
             ]
-            m1_lr_pairs = [[float(k), float(v)] for k, v in sorted(m1_log_range_emas.get(symbol, {}).items())]
-            h1_lr_pairs = [[float(k), float(v)] for k, v in sorted(h1_log_range_emas.get(symbol, {}).items())]
-
-            # Guard: if ALL EMA lists are empty the Rust orchestrator will
-            # crash with MissingEma.  For non-position symbols we can safely
-            # skip (they only contribute to forager ranking); for position
-            # symbols we MUST include them — log a warning and let Rust
-            # decide (it may still succeed with partial data).
-            if not m1_close_pairs and not m1_lr_pairs and not m1_volume_pairs and not h1_lr_pairs:
-                has_pos = self.has_position(symbol=symbol)
-                if not has_pos:
-                    logging.debug(
-                        "[ema] skipping %s from orchestrator input: no EMA data and no position",
-                        symbol,
-                    )
-                    continue
-                else:
-                    logging.warning(
-                        "[ema] %s has open position but ALL EMA data is empty; "
-                        "orchestrator may fail",
-                        symbol,
-                    )
+            m1_lr_pairs = [[float(k), float(v)] for k, v in sorted(m1_log_range_emas[symbol].items())]
+            h1_lr_pairs = [[float(k), float(v)] for k, v in sorted(h1_log_range_emas[symbol].items())]
 
             input_dict["symbols"].append(
                 {
