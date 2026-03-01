@@ -215,15 +215,17 @@ class HyperliquidBot(CCXTBot):
         )
         return positions, balance
 
-    async def _get_positions_and_balance_cached(self):
-        """Fetch positions+balance with dedup: concurrent callers share one API call."""
+    async def _get_positions_and_balance_cached(self, my_gen: int = 0):
+        """Fetch positions+balance with dedup: concurrent callers share one API call.
+
+        my_gen is the caller's snapshot of _hl_cache_generation taken *before*
+        acquiring the lock.  If another caller completed a fetch in the
+        meantime (cache_generation advanced), we return the cached result.
+        """
         if not hasattr(self, "_hl_fetch_lock"):
             self._hl_fetch_lock = asyncio.Lock()
         async with self._hl_fetch_lock:
-            # If another caller already fetched while we waited for the lock,
-            # return the cached result instead of making a second API call.
             cached_gen = getattr(self, "_hl_cache_generation", 0)
-            my_gen = getattr(self, "_hl_my_generation", 0)
             if cached_gen > my_gen and hasattr(self, "_hl_cached_result"):
                 return self._hl_cached_result
             result = await self._fetch_positions_and_balance()
@@ -232,9 +234,9 @@ class HyperliquidBot(CCXTBot):
             return result
 
     async def fetch_positions(self):
-        # Mark a new generation so fetch_balance knows to wait for our result
-        self._hl_my_generation = getattr(self, "_hl_cache_generation", 0)
-        positions, balance = await self._get_positions_and_balance_cached()
+        # Snapshot generation *before* lock so each caller tracks its own view.
+        my_gen = getattr(self, "_hl_cache_generation", 0)
+        positions, balance = await self._get_positions_and_balance_cached(my_gen)
         self._last_hl_balance = balance
         self._hl_balance_consumed = False
         return positions
@@ -246,9 +248,9 @@ class HyperliquidBot(CCXTBot):
         ):
             self._hl_balance_consumed = True
             return self._last_hl_balance
-        # Otherwise fetch (will share API call via lock if fetch_positions is in flight)
-        self._hl_my_generation = getattr(self, "_hl_cache_generation", 0)
-        positions, balance = await self._get_positions_and_balance_cached()
+        # Snapshot generation *before* lock so each caller tracks its own view.
+        my_gen = getattr(self, "_hl_cache_generation", 0)
+        positions, balance = await self._get_positions_and_balance_cached(my_gen)
         return balance
 
     async def fetch_tickers(self):
