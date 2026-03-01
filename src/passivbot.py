@@ -4367,6 +4367,23 @@ class Passivbot:
             m1_lr_pairs = [[float(k), float(v)] for k, v in sorted(m1_log_range_emas.get(symbol, {}).items())]
             h1_lr_pairs = [[float(k), float(v)] for k, v in sorted(h1_log_range_emas.get(symbol, {}).items())]
 
+            # Guard: skip symbols with completely empty EMA data and no position
+            # to prevent MissingEma crash in the Rust orchestrator.
+            if not m1_close_pairs and not m1_lr_pairs and not m1_volume_pairs and not h1_lr_pairs:
+                has_pos = self.has_position(symbol=symbol)
+                if not has_pos:
+                    logging.debug(
+                        "[ema] skipping %s from orchestrator input: no EMA data and no position",
+                        symbol,
+                    )
+                    continue
+                else:
+                    logging.warning(
+                        "[ema] %s has open position but ALL EMA data is empty; "
+                        "orchestrator may fail",
+                        symbol,
+                    )
+
             input_dict["symbols"].append(
                 {
                     "symbol_idx": int(idx),
@@ -4525,12 +4542,10 @@ class Passivbot:
             out: dict[float, float] = {}
             if not spans:
                 return out
-            # Skip network-bound work when we're already rate-limited
-            try:
-                if getattr(self.cm, "_rate_limit_until", 0) > time.time():
-                    return out
-            except Exception:
-                pass
+            # Do NOT skip when rate-limited: the CM functions return cached
+            # data instantly if max_age_ms is satisfied (common case).  An
+            # early abort here would prevent *all* cached-data access and
+            # cause MissingEma crashes for symbols with open positions.
             tasks = [asyncio.create_task(fn(symbol, sp)) for sp in spans]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for sp, res in zip(spans, results):
@@ -4567,9 +4582,9 @@ class Passivbot:
         #
         # Ordering: symbols with open positions first (they need EMA data
         # for correct order calculation), remaining symbols shuffled to
-        # avoid alphabetic starvation.  We do NOT break on rate-limit;
-        # fetch_map already returns {} when rate-limited, and cached
-        # symbols cost zero network calls regardless.
+        # avoid alphabetic starvation.  CM functions return cached data
+        # instantly when max_age_ms is satisfied; only truly stale data
+        # triggers a network call (gated by semaphore + backoff).
         symbols_with_pos = [s for s in symbols if self.has_position(symbol=s)]
         symbols_without_pos = [s for s in symbols if s not in symbols_with_pos]
         random.shuffle(symbols_without_pos)
@@ -4751,6 +4766,26 @@ class Passivbot:
             ]
             m1_lr_pairs = [[float(k), float(v)] for k, v in sorted(m1_log_range_emas.get(symbol, {}).items())]
             h1_lr_pairs = [[float(k), float(v)] for k, v in sorted(h1_log_range_emas.get(symbol, {}).items())]
+
+            # Guard: if ALL EMA lists are empty the Rust orchestrator will
+            # crash with MissingEma.  For non-position symbols we can safely
+            # skip (they only contribute to forager ranking); for position
+            # symbols we MUST include them — log a warning and let Rust
+            # decide (it may still succeed with partial data).
+            if not m1_close_pairs and not m1_lr_pairs and not m1_volume_pairs and not h1_lr_pairs:
+                has_pos = self.has_position(symbol=symbol)
+                if not has_pos:
+                    logging.debug(
+                        "[ema] skipping %s from orchestrator input: no EMA data and no position",
+                        symbol,
+                    )
+                    continue
+                else:
+                    logging.warning(
+                        "[ema] %s has open position but ALL EMA data is empty; "
+                        "orchestrator may fail",
+                        symbol,
+                    )
 
             input_dict["symbols"].append(
                 {
