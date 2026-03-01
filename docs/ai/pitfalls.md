@@ -249,6 +249,57 @@ async def fetch_positions(self):
 
 ---
 
+### Silent Error Suppression in EMA/Orchestrator Paths
+
+**Don't**: Catch exceptions (or use `return_exceptions=True`) and then silently drop failed required EMA spans.
+
+**Because**: This hides root cause and pushes malformed input downstream, often surfacing later as harder-to-debug errors (for example `MissingEma` in Rust).
+
+**Example**:
+```python
+# WRONG: Silent drop of required spans
+results = await asyncio.gather(*tasks, return_exceptions=True)
+for span, res in zip(spans, results):
+    if isinstance(res, Exception):
+        continue  # silently dropped
+    out[span] = float(res)
+
+# CORRECT: Fail loudly or explicit bounded fallback
+results = await asyncio.gather(*tasks, return_exceptions=True)
+for span, res in zip(spans, results):
+    if isinstance(res, Exception):
+        raise RuntimeError(f"missing required close EMA {symbol} span={span}: {res}") from res
+    val = float(res)
+    if not math.isfinite(val):
+        raise RuntimeError(f"non-finite required close EMA {symbol} span={span}: {val}")
+    out[span] = val
+```
+
+**Instead**: For required EMA inputs, either raise immediately with context or use a narrowly scoped, explicitly logged fallback policy approved for that path.
+
+---
+
+### Silent "Safe Defaults" for Required Trading Inputs
+
+**Don't**: Use safe defaults for required trading inputs (for example `.get(key, 0.0)` for required EMA/risk values).
+
+**Because**: Neutral defaults can mask data integrity failures and produce dangerous behavior.
+
+**Example**:
+```python
+# WRONG: Safe default hides missing required input
+ema = m1_close_emas[symbol].get(span, 0.0)
+
+# CORRECT: Enforce required key and fail loudly
+if span not in m1_close_emas[symbol]:
+    raise RuntimeError(f"missing required EMA for {symbol} span={span}")
+ema = m1_close_emas[symbol][span]
+```
+
+**Instead**: Treat required values as required. Only use defaults for genuinely optional fields, and document that optionality explicitly.
+
+---
+
 ### Using Raw CCXT Exchange IDs for Cache Paths
 
 **Don't**: Use `exchange.id` (the CCXT instance ID) directly in file paths or cache directories.

@@ -53,6 +53,36 @@ Prefer clear exceptions over silent error handling.
 - Exchange fetch methods must NOT catch exceptions
 - Let errors propagate to caller who handles via `restart_bot_on_too_many_errors()`
 - Include actionable error messages
+- Silent error handling is forbidden in critical paths (exchange data, EMA computation, risk, order construction)
+
+#### Forbidden Patterns (Critical Paths)
+
+- `except Exception: pass`, `except Exception: continue`, or returning neutral defaults after catching errors
+- `asyncio.gather(..., return_exceptions=True)` when exceptions are then ignored/dropped
+- `dict.get(required_key, safe_default)` for required trading inputs
+- Converting required-input failures into `0.0`, `None`, `{}`, `[]`, or `False` without an explicit, documented fallback policy
+
+#### Required Error Contract
+
+- Required inputs must be complete before handing data to Rust orchestrator/backtester
+- If a required input fetch fails, either:
+  - raise immediately with full context; or
+  - use an explicitly allowed fallback with warning logs that include reason and context
+- If fallback is unavailable, raise immediately (do not degrade silently)
+
+#### Fallback Policy Matrix
+
+| Path/Input | Default Policy | Allowed Fallback | If Fallback Used |
+|------------|----------------|------------------|------------------|
+| Exchange fetch methods (`fetch_balance`, `fetch_positions`, `fetch_open_orders`, etc.) | Raise | None | N/A |
+| Required EMA inputs for orchestrator | Raise | Reuse previous EMA for same `symbol/span` only when explicitly implemented for that path | Log `[ema]` warning with symbol/span/reason/age/count and test fallback behavior |
+| Risk-gating inputs (loss caps, exposure limits, position state) | Raise | None unless explicitly approved by user in task | Log explicit warning + add regression test |
+| Any other trading-critical required field | Raise | None unless documented in feature docs + approved in task | Log explicit warning + add regression test |
+
+#### Critical Path Rule
+
+- In exchange data, EMA, risk, and order paths: hard-fail is the default.
+- Any exception to hard-fail must be explicitly requested/approved in the current task and covered by tests.
 
 ### Avoid Over-Engineering
 
@@ -98,6 +128,15 @@ See [docs/ai/principles.yaml](docs/ai/principles.yaml) for full conventions.
 2. **Check [docs/ai/exchange_api_quirks.md](docs/ai/exchange_api_quirks.md)** if touching exchange code
 3. **Check [docs/ai/features/](docs/ai/features/)** if a feature doc exists for your area
 4. **Read [docs/ai/principles.yaml](docs/ai/principles.yaml)** for conventions
+5. **Run a silent-handling self-audit** for touched files:
+
+```bash
+rg -n "except Exception|return_exceptions=True|\\.get\\([^\\n]*,\\s*(0|0\\.0|None|False|\\{\\}|\\[\\])\\)" src tests
+```
+
+6. **If matches are present in changed code**, either:
+   - remove them; or
+   - justify them explicitly in PR notes and add targeted tests.
 
 ## Architecture at a Glance
 
@@ -133,6 +172,10 @@ See [docs/ai/architecture.md](docs/ai/architecture.md) for detailed component de
 
 Use `[tag]` format: `[order]`, `[fill]`, `[pos]`, `[health]`
 
+Fallbacks in trading-critical paths must log a warning with a stable tag and context fields:
+- Recommended tag: `[ema]` for EMA fallback, `[risk]` for risk fallback
+- Required fields: `symbol`, `span`/parameter, `reason`, fallback value source, `age_ms` (if applicable), consecutive fallback count
+
 See [docs/ai/logging_guide.md](docs/ai/logging_guide.md) for detailed guidelines.
 
 ## Documentation Index
@@ -159,6 +202,12 @@ pytest tests/test_specific.py::test_name  # Specific test
 ```
 
 Write tests for both normal and edge cases. Include property-based tests where applicable.
+
+For any new fallback behavior, tests must cover:
+- fallback is actually used when primary input fails
+- warning/visibility behavior (or explicit failure message content)
+- hard failure when fallback input is unavailable
+- explicit guard against unsafe substitution (e.g., last-price substitution for EMA)
 
 ## Branch Context
 
