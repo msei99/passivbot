@@ -3170,7 +3170,7 @@ class Passivbot:
             self.get_hysteresis_snapped_balance()
             * effective_limit
             * self.bp(pside, "entry_initial_qty_pct", symbol)
-            >= self.effective_min_cost[symbol]
+            >= self.effective_min_cost.get(symbol, 0.0)
         )
 
     def get_hysteresis_snapped_balance(self) -> float:
