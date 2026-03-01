@@ -2655,28 +2655,31 @@ class Passivbot:
         self.set_wallet_exposure_limits()
         previous_PB_modes = deepcopy(self.PB_modes) if hasattr(self, "PB_modes") else None
         self.PB_modes = {"long": {}, "short": {}}
-        # Compute forager fetch budget once before the per-side loop and split
-        # evenly between long and short.  Without this, the first side (long)
-        # drains the entire token bucket and the second side (short) always
-        # gets budget=0, starving its ranking freshness.
-        _n_sides = 2
-        _pre_budget = None
-        _pre_max_calls = get_optional_live_value(self.config, "max_ohlcv_fetches_per_minute", 0)
+        # Compute a shared forager fetch budget once per cycle and split it fairly by side.
+        # This avoids deterministic long->short starvation when budget is tight.
+        side_fetch_budgets: Dict[str, int] = {}
+        max_calls = get_optional_live_value(self.config, "max_ohlcv_fetches_per_minute", 0)
         try:
-            _pre_max_calls = int(_pre_max_calls) if _pre_max_calls is not None else 0
+            max_calls = int(max_calls) if max_calls is not None else 0
         except Exception:
-            _pre_max_calls = 0
-        if _pre_max_calls > 0:
-            _total_budget = self._forager_refresh_budget(_pre_max_calls)
-            _pre_budget = max(1, _total_budget // _n_sides) if _total_budget > 0 else 0
-
+            max_calls = 0
+        if max_calls > 0:
+            forager_sides = [pside for pside in ("long", "short") if self.is_forager_mode(pside)]
+            if forager_sides:
+                total_budget = self._forager_refresh_budget(max_calls)
+                side_fetch_budgets = self._split_forager_budget_by_side(total_budget, forager_sides)
         for pside, other_pside in [("long", "short"), ("short", "long")]:
             if self.is_forager_mode(pside):
                 await self.update_first_timestamps()
             for symbol in self.coin_overrides:
                 if flag := self.get_forced_PB_mode(pside, symbol):
                     self.PB_modes[pside][symbol] = flag
-            ideal_coins = await self.get_filtered_coins(pside, fetch_budget=_pre_budget)
+            ideal_coins = await self.get_filtered_coins(
+                pside,
+                max_network_fetches=(
+                    side_fetch_budgets[pside] if pside in side_fetch_budgets else None
+                ),
+            )
             slots_filled = {
                 k for k, v in self.PB_modes[pside].items() if v in ["normal", "graceful_stop"]
             }
@@ -2826,7 +2829,9 @@ class Passivbot:
                         pass
                     logging.info("[mode] %s %s%s", change_type, elm, info_suffix)
 
-    async def get_filtered_coins(self, pside: str, *, fetch_budget: int = None) -> List[str]:
+    async def get_filtered_coins(
+        self, pside: str, *, max_network_fetches: Optional[int] = None
+    ) -> List[str]:
         """Select ideal coins for a side using EMA-based volume and log-range filters.
 
         Steps (for forager mode):
@@ -2873,8 +2878,13 @@ class Passivbot:
                 max_age_ms = self._forager_target_staleness_ms(len(candidates), max_calls)
             # Use pre-computed per-side budget from caller if available;
             # otherwise fall back to computing it here (for backward compat).
-            if fetch_budget is None and max_calls > 0:
-                fetch_budget = self._forager_refresh_budget(max_calls)
+            if max_network_fetches is None:
+                fetch_budget = self._forager_refresh_budget(max_calls) if max_calls > 0 else None
+            else:
+                try:
+                    fetch_budget = max(0, int(max_network_fetches))
+                except Exception:
+                    fetch_budget = 0
             if clip_pct > 0.0:
                 volumes, log_ranges = await self.calc_volumes_and_log_ranges(
                     pside,
@@ -3184,7 +3194,7 @@ class Passivbot:
             self.get_hysteresis_snapped_balance()
             * effective_limit
             * self.bp(pside, "entry_initial_qty_pct", symbol)
-            >= self.effective_min_cost.get(symbol, 0.0)
+            >= self.effective_min_cost.get(symbol, float("inf"))
         )
 
     def get_hysteresis_snapped_balance(self) -> float:
@@ -5466,6 +5476,29 @@ class Passivbot:
         state["last_ms"] = int(now)
         self._forager_refresh_state = state
         return max(0, budget)
+
+    def _split_forager_budget_by_side(
+        self, total_budget: int, sides: Iterable[str]
+    ) -> Dict[str, int]:
+        """Split a cycle budget fairly across sides with round-robin remainder."""
+        side_list = [s for s in sides if s in ("long", "short")]
+        out = {s: 0 for s in side_list}
+        try:
+            total = int(total_budget)
+        except Exception:
+            total = 0
+        if total <= 0 or not side_list:
+            return out
+        n = len(side_list)
+        base = total // n
+        rem = total % n
+        for s in side_list:
+            out[s] = base
+        start = int(getattr(self, "_forager_budget_rr", 0) or 0) % n
+        for i in range(rem):
+            out[side_list[(start + i) % n]] += 1
+        self._forager_budget_rr = (start + 1) % n
+        return out
 
     def _forager_target_staleness_ms(self, n_symbols: int, max_calls_per_minute: int) -> int:
         """Compute max acceptable staleness for forager candidates based on refresh budget."""
