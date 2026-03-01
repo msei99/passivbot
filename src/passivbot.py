@@ -2969,8 +2969,23 @@ class Passivbot:
             for s in syms:
                 per_sym_ttl[s] = int(max_age_ms) if max_age_ms is not None else 0
 
+        # Identify symbols with CACHE_ONLY_TTL that have never been fetched.
+        # get_candles treats last_refresh_ms==0 as "needs refresh" regardless of
+        # TTL, which would bypass the budget.  Skip them entirely; they will be
+        # picked up by the staleness-first rotation in subsequent cycles.
+        cache_only_never_fetched: set = set()
+        for s in syms:
+            if per_sym_ttl.get(s) == CACHE_ONLY_TTL:
+                try:
+                    if self.cm.get_last_refresh_ms(s) == 0:
+                        cache_only_never_fetched.add(s)
+                except Exception:
+                    cache_only_never_fetched.add(s)
+
         async def one(symbol: str):
             try:
+                if symbol in cache_only_never_fetched:
+                    return (0.0, 0.0)
                 ttl = per_sym_ttl.get(symbol)
                 if ttl is None or ttl == 0:
                     if max_age_ms is not None:
@@ -3155,7 +3170,7 @@ class Passivbot:
             self.get_hysteresis_snapped_balance()
             * effective_limit
             * self.bp(pside, "entry_initial_qty_pct", symbol)
-            >= self.effective_min_cost[symbol]
+            >= self.effective_min_cost.get(symbol, 0.0)
         )
 
     def get_hysteresis_snapped_balance(self) -> float:
@@ -5843,9 +5858,24 @@ class Passivbot:
             for s in syms:
                 per_sym_ttl[s] = int(max_age_ms) if max_age_ms is not None else 0
 
+        # Guard: skip symbols with CACHE_ONLY_TTL that have never been fetched.
+        # get_candles treats last_refresh_ms==0 as "needs refresh" regardless
+        # of TTL, which would bypass the budget.  They will be fetched by the
+        # staleness-first rotation in subsequent cycles.
+        cache_only_never_fetched: set = set()
+        for s in syms:
+            if per_sym_ttl.get(s) == CACHE_ONLY_TTL:
+                try:
+                    if self.cm.get_last_refresh_ms(s) == 0:
+                        cache_only_never_fetched.add(s)
+                except Exception:
+                    cache_only_never_fetched.add(s)
+
         # Compute EMA of log range on 1m candles: ln(high/low)
         async def one(symbol: str):
             try:
+                if symbol in cache_only_never_fetched:
+                    return 0.0
                 ttl = per_sym_ttl.get(symbol)
                 if ttl is None or ttl == 0:
                     # If caller passes a TTL, use it; otherwise select per-symbol TTL
